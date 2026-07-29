@@ -239,13 +239,20 @@ class AwsEventStreamParser:
         ...         print(event["data"])
     """
     
-    # Patterns for finding JSON events
+    # Patterns for finding JSON events.
+    # NOTE: Kiro streams reasoning as a reasoningContentEvent frame whose payload
+    # is a plain {"text": ...} JSON object (plus a separate {"signature": ...}
+    # frame carrying the encrypted thinking signature). The '{"text":' pattern is
+    # safe here because these frame payloads are top-level single-field objects in
+    # the AWS event stream; the model's own content arrives as '{"content":'.
     EVENT_PATTERNS = [
         ('{"content":', 'content'),
         ('{"name":', 'tool_start'),
         ('{"input":', 'tool_input'),
         ('{"stop":', 'tool_stop'),
         ('{"followupPrompt":', 'followup'),
+        ('{"text":', 'reasoning'),
+        ('{"signature":', 'reasoning_signature'),
         ('{"usage":', 'usage'),
         ('{"unit":', 'metering'),
         ('{"contextUsagePercentage":', 'context_usage'),
@@ -331,6 +338,14 @@ class AwsEventStreamParser:
             return {"type": "usage", "data": data.get('usage', 0)}
         elif event_type == 'metering':
             return self._process_metering_event(data)
+        elif event_type == 'reasoning':
+            text = data.get('text')
+            if isinstance(text, str) and text:
+                return {"type": "reasoning", "data": text}
+            return None
+        elif event_type == 'reasoning_signature':
+            # The encrypted thinking signature; not needed for token accounting.
+            return None
         elif event_type == 'context_usage':
             return {"type": "context_usage", "data": data.get('contextUsagePercentage', 0)}
         

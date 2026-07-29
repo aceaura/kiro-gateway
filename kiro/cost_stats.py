@@ -91,12 +91,16 @@ _EFFORT_RATIO_THRESHOLDS: List[tuple] = [
 ]
 
 # Fallback buckets when max_tokens is unknown and only an absolute budget exists.
+# Calibrated to the FAKE_REASONING_MAX_TOKENS base (4000) so that Anthropic clients
+# sending a raw thinking.budget_tokens land in the same effort bucket an OpenAI
+# client would for the equivalent reasoning_effort. Boundaries are the midpoints
+# between adjacent budget levels at that base (400/800/2000/3200/3800).
 _EFFORT_ABSOLUTE_THRESHOLDS: List[tuple] = [
     (0, "none"),
-    (2048, "minimal"),
-    (6144, "low"),
-    (16384, "medium"),
-    (32768, "high"),
+    (600, "minimal"),
+    (1400, "low"),
+    (2600, "medium"),
+    (3500, "high"),
 ]
 
 
@@ -146,9 +150,14 @@ def classify_effort(
         return "none"
 
     # Prefer the ratio-based mapping, which matches how efforts are converted
-    # into budgets in the first place.
+    # into budgets in the first place. A budget that exceeds the output limit
+    # (ratio > 1) is not a meaningful effort signal — the client sent a budget
+    # larger than the response can hold — so it is reported as "default" rather
+    # than mislabelled as maximum effort.
     if max_tokens and max_tokens > 0:
         ratio = thinking_budget / max_tokens
+        if ratio > 1.0:
+            return "default"
         for threshold, label in _EFFORT_RATIO_THRESHOLDS:
             if ratio <= threshold:
                 return label
@@ -191,6 +200,9 @@ class CostStatsStore:
         input_tokens: int,
         output_tokens: int,
         credits: Optional[float],
+        thinking_tokens: int = 0,
+        cache_read_input_tokens: int = 0,
+        cache_creation_input_tokens: int = 0,
     ) -> Dict[str, Any]:
         """
         Adds one request to the aggregate.
@@ -198,9 +210,12 @@ class CostStatsStore:
         Args:
             model: Model id used for the request
             effort: Effort label from classify_effort()
-            input_tokens: Input/prompt tokens
-            output_tokens: Output/completion tokens
+            input_tokens: Input/prompt tokens (excluding cache-read portion)
+            output_tokens: Visible output/completion tokens (excluding thinking)
             credits: Credits reported by Kiro, or None when not reported
+            thinking_tokens: Reasoning/thinking tokens (billed but not visible output)
+            cache_read_input_tokens: Input tokens served from prompt cache
+            cache_creation_input_tokens: Input tokens written into prompt cache
 
         Returns:
             The updated group aggregate (a copy, safe to serialise)
@@ -216,11 +231,17 @@ class CostStatsStore:
                 "credits": 0.0,
                 "input_tokens": 0,
                 "output_tokens": 0,
+                "thinking_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
             })
 
             group["requests"] += 1
             group["input_tokens"] += max(0, input_tokens)
             group["output_tokens"] += max(0, output_tokens)
+            group["thinking_tokens"] += max(0, thinking_tokens)
+            group["cache_read_input_tokens"] += max(0, cache_read_input_tokens)
+            group["cache_creation_input_tokens"] += max(0, cache_creation_input_tokens)
 
             self._requests_total += 1
 
@@ -252,11 +273,17 @@ class CostStatsStore:
         total_credits = 0.0
         total_input = 0
         total_output = 0
+        total_thinking = 0
+        total_cache_read = 0
+        total_cache_creation = 0
 
         for group in groups:
             total_credits += group["credits"]
             total_input += group["input_tokens"]
             total_output += group["output_tokens"]
+            total_thinking += group.get("thinking_tokens", 0)
+            total_cache_read += group.get("cache_read_input_tokens", 0)
+            total_cache_creation += group.get("cache_creation_input_tokens", 0)
             _attach_derived_metrics(group)
 
         groups.sort(key=lambda item: (item["credits"], item["requests"]), reverse=True)
@@ -267,6 +294,9 @@ class CostStatsStore:
             "credits": round(total_credits, 6),
             "input_tokens": total_input,
             "output_tokens": total_output,
+            "thinking_tokens": total_thinking,
+            "cache_read_input_tokens": total_cache_read,
+            "cache_creation_input_tokens": total_cache_creation,
         }
         _attach_derived_metrics(totals)
 
@@ -286,10 +316,21 @@ def _attach_derived_metrics(bucket: Dict[str, Any]) -> None:
 
     Ratios are only meaningful for requests where Kiro actually reported credits,
     so requests_with_credits is used as the denominator rather than requests.
+
+    total_tokens counts every billed token: visible input + visible output +
+    thinking + cache-read + cache-creation. Cache-read is included because it is
+    still served (and typically billed at a reduced cache rate); the separate
+    cache fields let callers subtract it if they want the uncached figure.
     """
     credits = bucket.get("credits", 0.0) or 0.0
     priced_requests = bucket.get("requests_with_credits", 0) or 0
-    total_tokens = (bucket.get("input_tokens", 0) or 0) + (bucket.get("output_tokens", 0) or 0)
+    total_tokens = (
+        (bucket.get("input_tokens", 0) or 0)
+        + (bucket.get("output_tokens", 0) or 0)
+        + (bucket.get("thinking_tokens", 0) or 0)
+        + (bucket.get("cache_read_input_tokens", 0) or 0)
+        + (bucket.get("cache_creation_input_tokens", 0) or 0)
+    )
 
     bucket["credits"] = round(credits, 6)
     bucket["total_tokens"] = total_tokens
@@ -297,6 +338,19 @@ def _attach_derived_metrics(bucket: Dict[str, Any]) -> None:
     bucket["tokens_per_credit"] = round(total_tokens / credits, 2) if credits > 0 else None
     bucket["output_tokens_per_credit"] = (
         round((bucket.get("output_tokens", 0) or 0) / credits, 2) if credits > 0 else None
+    )
+    # Thinking overhead: reasoning tokens as a share of all billed tokens.
+    bucket["thinking_share"] = (
+        round((bucket.get("thinking_tokens", 0) or 0) / total_tokens, 4) if total_tokens > 0 else None
+    )
+    # Cache hit rate: cache-read as a share of all input-side tokens.
+    input_side = (
+        (bucket.get("input_tokens", 0) or 0)
+        + (bucket.get("cache_read_input_tokens", 0) or 0)
+        + (bucket.get("cache_creation_input_tokens", 0) or 0)
+    )
+    bucket["cache_hit_rate"] = (
+        round((bucket.get("cache_read_input_tokens", 0) or 0) / input_side, 4) if input_side > 0 else None
     )
 
 
@@ -403,6 +457,9 @@ def record_request_cost(
     max_tokens: Optional[int] = None,
     thinking_enabled: bool = True,
     stream: bool = False,
+    thinking_tokens: int = 0,
+    cache_read_input_tokens: int = 0,
+    cache_creation_input_tokens: int = 0,
 ) -> Dict[str, Any]:
     """
     Records and logs the cost of one completed request.
@@ -413,13 +470,16 @@ def record_request_cost(
 
     Args:
         model: Model id used for the request
-        input_tokens: Input/prompt tokens
-        output_tokens: Output/completion tokens
+        input_tokens: Input/prompt tokens (excluding cache-read portion)
+        output_tokens: Visible output/completion tokens (excluding thinking)
         credits: Credits from Kiro's meteringEvent (None when not reported)
         thinking_budget: Thinking budget in tokens, if the client set one
         max_tokens: Request output limit, used to normalise the effort label
         thinking_enabled: False when the client disabled thinking
         stream: Whether the request was streamed
+        thinking_tokens: Reasoning/thinking tokens (billed but not visible output)
+        cache_read_input_tokens: Input tokens served from prompt cache
+        cache_creation_input_tokens: Input tokens written into prompt cache
 
     Returns:
         The record that was logged and aggregated
@@ -430,6 +490,9 @@ def record_request_cost(
     safe_credits = coerce_credits(credits)
     safe_input_tokens = coerce_token_count(input_tokens)
     safe_output_tokens = coerce_token_count(output_tokens)
+    safe_thinking_tokens = coerce_token_count(thinking_tokens)
+    safe_cache_read = coerce_token_count(cache_read_input_tokens)
+    safe_cache_creation = coerce_token_count(cache_creation_input_tokens)
     safe_thinking_budget = coerce_optional_int(thinking_budget)
     safe_max_tokens = coerce_optional_int(max_tokens)
 
@@ -439,7 +502,14 @@ def record_request_cost(
         thinking_enabled=bool(thinking_enabled),
     )
 
-    total_tokens = safe_input_tokens + safe_output_tokens
+    # total_tokens counts every billed token, including thinking and cache.
+    total_tokens = (
+        safe_input_tokens
+        + safe_output_tokens
+        + safe_thinking_tokens
+        + safe_cache_read
+        + safe_cache_creation
+    )
 
     record: Dict[str, Any] = {
         "model": model,
@@ -448,6 +518,9 @@ def record_request_cost(
         "max_tokens": safe_max_tokens,
         "input_tokens": safe_input_tokens,
         "output_tokens": safe_output_tokens,
+        "thinking_tokens": safe_thinking_tokens,
+        "cache_read_input_tokens": safe_cache_read,
+        "cache_creation_input_tokens": safe_cache_creation,
         "total_tokens": total_tokens,
         "credits": safe_credits,
         "stream": bool(stream),
@@ -466,6 +539,9 @@ def record_request_cost(
         input_tokens=safe_input_tokens,
         output_tokens=safe_output_tokens,
         credits=safe_credits,
+        thinking_tokens=safe_thinking_tokens,
+        cache_read_input_tokens=safe_cache_read,
+        cache_creation_input_tokens=safe_cache_creation,
     )
 
     credits_text = f"{safe_credits:.4f}" if safe_credits is not None else "n/a"
@@ -474,10 +550,16 @@ def record_request_cost(
         if record["tokens_per_credit"] is not None
         else ""
     )
+    thinking_text = f" think={safe_thinking_tokens}" if safe_thinking_tokens else ""
+    cache_text = (
+        f" cache(r={safe_cache_read},w={safe_cache_creation})"
+        if (safe_cache_read or safe_cache_creation)
+        else ""
+    )
     logger.info(
         f"[Cost] {model} effort={effort} "
-        f"in={safe_input_tokens} out={safe_output_tokens} total={total_tokens} "
-        f"credits={credits_text}{efficiency_text}"
+        f"in={safe_input_tokens} out={safe_output_tokens}{thinking_text}{cache_text} "
+        f"total={total_tokens} credits={credits_text}{efficiency_text}"
     )
 
     _append_to_file(record)

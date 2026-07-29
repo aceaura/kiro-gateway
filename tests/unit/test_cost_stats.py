@@ -104,10 +104,11 @@ class TestClassifyEffort:
             print(f"effort={effort} budget={budget} -> {result}")
             assert result == effort
 
-    def test_ratio_above_all_thresholds_is_xhigh(self):
+    def test_ratio_above_output_limit_is_default(self):
         """
-        What it does: Classifies a budget exceeding max_tokens as "xhigh".
-        Goal: Ratios above 1.0 must saturate instead of falling through to None.
+        What it does: Reports a budget larger than max_tokens as "default".
+        Goal: A budget exceeding the output limit (ratio > 1) is not a meaningful
+              effort signal and must not be mislabelled as maximum effort.
         """
         from kiro.cost_stats import classify_effort
 
@@ -115,23 +116,43 @@ class TestClassifyEffort:
         result = classify_effort(thinking_budget=9000, max_tokens=1000)
 
         print(f"Result: {result}")
-        assert result == "xhigh"
+        assert result == "default"
 
     def test_uses_absolute_thresholds_without_max_tokens(self):
         """
         What it does: Falls back to absolute buckets when max_tokens is unknown.
-        Goal: Anthropic clients may send a budget with no usable output limit.
+        Goal: Anthropic clients sending a raw budget must land in the same bucket
+              as the equivalent OpenAI effort (calibrated to the 4000 base).
         """
         from kiro.cost_stats import classify_effort
 
         cases = [
-            (1024, "minimal"),
-            (4096, "low"),
-            (10000, "medium"),
-            (30000, "high"),
-            (100000, "xhigh"),
+            (400, "minimal"),
+            (800, "low"),
+            (2000, "medium"),
+            (3200, "high"),
+            (3800, "xhigh"),
         ]
         for budget, expected in cases:
+            result = classify_effort(thinking_budget=budget, max_tokens=None)
+            print(f"budget={budget} -> {result} (expected {expected})")
+            assert result == expected
+
+    def test_absolute_thresholds_boundaries(self):
+        """
+        What it does: Verifies the absolute bucket midpoints split levels cleanly.
+        Goal: Budgets between two levels must resolve to the nearer effort.
+        """
+        from kiro.cost_stats import classify_effort
+
+        boundary_cases = [
+            (0, "none"),
+            (599, "minimal"), (600, "minimal"), (601, "low"),
+            (1399, "low"), (1400, "low"), (1401, "medium"),
+            (2599, "medium"), (2600, "medium"), (2601, "high"),
+            (3499, "high"), (3500, "high"), (3501, "xhigh"),
+        ]
+        for budget, expected in boundary_cases:
             result = classify_effort(thinking_budget=budget, max_tokens=None)
             print(f"budget={budget} -> {result} (expected {expected})")
             assert result == expected
@@ -144,7 +165,7 @@ class TestClassifyEffort:
         from kiro.cost_stats import classify_effort
 
         print("Action: Classifying with max_tokens=0...")
-        result = classify_effort(thinking_budget=10000, max_tokens=0)
+        result = classify_effort(thinking_budget=2000, max_tokens=0)
 
         print(f"Result: {result}")
         assert result == "medium"
@@ -645,6 +666,74 @@ class TestRecordRequestCost:
 
         assert streamed["stream"] is True
         assert blocking["stream"] is False
+
+    def test_thinking_and_cache_dimensions_recorded(self):
+        """
+        What it does: Records thinking and cache tokens as separate dimensions.
+        Goal: Visible output must exclude thinking, and cache tokens must be tracked
+              separately so thinking overhead and cache savings are measurable.
+        """
+        from kiro.cost_stats import record_request_cost
+
+        record = record_request_cost(
+            model="claude-opus-5",
+            input_tokens=1000,
+            output_tokens=200,
+            thinking_tokens=800,
+            cache_read_input_tokens=5000,
+            cache_creation_input_tokens=300,
+            credits=2.0,
+        )
+        print(f"Record: {record}")
+
+        assert record["output_tokens"] == 200
+        assert record["thinking_tokens"] == 800
+        assert record["cache_read_input_tokens"] == 5000
+        assert record["cache_creation_input_tokens"] == 300
+        # total counts every billed token including thinking and cache
+        assert record["total_tokens"] == 1000 + 200 + 800 + 5000 + 300
+
+    def test_thinking_and_cache_aggregated_with_derived_metrics(self):
+        """
+        What it does: Aggregates thinking/cache and derives thinking_share and cache_hit_rate.
+        Goal: These ratios are how thinking overhead and cache benefit are read off.
+        """
+        from kiro.cost_stats import CostStatsStore
+
+        store = CostStatsStore()
+        store.record(
+            "m", "high",
+            input_tokens=1000, output_tokens=200, credits=2.0,
+            thinking_tokens=800, cache_read_input_tokens=8000, cache_creation_input_tokens=1000,
+        )
+
+        group = store.snapshot()["groups"][0]
+        print(f"Group: {group}")
+
+        assert group["thinking_tokens"] == 800
+        assert group["cache_read_input_tokens"] == 8000
+        assert group["cache_creation_input_tokens"] == 1000
+        # total = 1000 + 200 + 800 + 8000 + 1000 = 11000
+        assert group["total_tokens"] == 11000
+        assert group["thinking_share"] == pytest.approx(800 / 11000, abs=1e-3)
+        # cache_hit_rate = cache_read / (input + cache_read + cache_creation)
+        assert group["cache_hit_rate"] == pytest.approx(8000 / 10000, abs=1e-3)
+
+    def test_derived_metrics_none_when_no_tokens(self):
+        """
+        What it does: Avoids division by zero for thinking_share/cache_hit_rate.
+        Goal: Empty buckets must not crash the snapshot.
+        """
+        from kiro.cost_stats import CostStatsStore
+
+        store = CostStatsStore()
+        store.record("m", "high", input_tokens=0, output_tokens=0, credits=None)
+
+        group = store.snapshot()["groups"][0]
+        print(f"Group: {group}")
+
+        assert group["thinking_share"] is None
+        assert group["cache_hit_rate"] is None
 
     def test_logs_cost_line(self, caplog):
         """

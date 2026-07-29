@@ -317,7 +317,12 @@ async def stream_kiro_to_openai_internal(
             finish_reason = "stop"
         
         # Count completion_tokens (output) using tiktoken
+        # Client-visible figure includes thinking, per upstream behaviour.
         completion_tokens = count_tokens(full_content + full_thinking_content)
+
+        # Split visible vs reasoning tokens for cost accounting only.
+        thinking_token_count = count_tokens(full_thinking_content) if full_thinking_content else 0
+        visible_completion_tokens = completion_tokens - thinking_token_count
         
         # Calculate total_tokens based on context_usage_percentage from Kiro API
         # context_usage shows TOTAL percentage of context usage (input + output)
@@ -433,16 +438,28 @@ async def stream_kiro_to_openai_internal(
             f"total_tokens={total_tokens} ({total_source})"
         )
 
-        # Record the model / effort / tokens / credits relationship for cost analysis
+        # Record the model / effort / tokens / credits relationship for cost analysis.
+        # Cache fields come from the legacy usage event when upstream provides them.
+        cache_read = 0
+        cache_creation = 0
+        if isinstance(metering_data, dict):
+            cr = metering_data.get("cache_read_input_tokens") or metering_data.get("cacheReadInputTokens")
+            cc = metering_data.get("cache_creation_input_tokens") or metering_data.get("cacheCreationInputTokens")
+            cache_read = cr if isinstance(cr, (int, float)) and not isinstance(cr, bool) else 0
+            cache_creation = cc if isinstance(cc, (int, float)) and not isinstance(cc, bool) else 0
+
         record_request_cost(
             model=model,
             input_tokens=prompt_tokens,
-            output_tokens=completion_tokens,
+            output_tokens=visible_completion_tokens,
             credits=credits_used,
             thinking_budget=thinking_budget,
             max_tokens=request_max_tokens,
             thinking_enabled=thinking_enabled,
             stream=is_streaming,
+            thinking_tokens=thinking_token_count,
+            cache_read_input_tokens=cache_read,
+            cache_creation_input_tokens=cache_creation,
         )
         
         yield f"data: {json.dumps(final_chunk, ensure_ascii=False)}\n\n"

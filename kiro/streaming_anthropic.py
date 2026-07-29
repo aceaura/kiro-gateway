@@ -633,8 +633,14 @@ async def stream_kiro_to_anthropic(
                 f"{'Model will be notified automatically about truncation.' if TRUNCATION_RECOVERY else 'Set TRUNCATION_RECOVERY=true in .env to auto-notify model about truncation.'}"
             )
         
-        # Calculate output tokens
+        # Calculate output tokens (client-visible: includes thinking, per upstream behaviour)
         output_tokens = count_tokens(full_content + full_thinking_content)
+
+        # Split visible vs reasoning tokens for cost accounting only. The client
+        # keeps the combined figure; cost stats separate them so thinking overhead
+        # is visible and output efficiency is not inflated by reasoning tokens.
+        thinking_token_count = count_tokens(full_thinking_content) if full_thinking_content else 0
+        visible_output_tokens = output_tokens - thinking_token_count
         
         # Calculate total tokens from context usage if available
         if context_usage_percentage is not None:
@@ -666,12 +672,15 @@ async def stream_kiro_to_anthropic(
         record_request_cost(
             model=model,
             input_tokens=input_tokens,
-            output_tokens=output_tokens,
+            output_tokens=visible_output_tokens,
             credits=credits_used,
             thinking_budget=thinking_budget,
             max_tokens=request_max_tokens,
             thinking_enabled=thinking_enabled,
             stream=True,
+            thinking_tokens=thinking_token_count,
+            cache_read_input_tokens=upstream_cache_usage.get("cache_read_input_tokens", 0),
+            cache_creation_input_tokens=upstream_cache_usage.get("cache_creation_input_tokens", 0),
         )
 
         yield format_sse_event("message_delta", {
@@ -835,8 +844,12 @@ async def collect_anthropic_response(
             "input": tool_input
         })
     
-    # Calculate output tokens
+    # Calculate output tokens (client-visible: includes thinking, per upstream behaviour)
     output_tokens = count_tokens(result.content + result.thinking_content)
+
+    # Split visible vs reasoning tokens for cost accounting only.
+    thinking_token_count = count_tokens(result.thinking_content) if result.thinking_content else 0
+    visible_output_tokens = output_tokens - thinking_token_count
     
     # Calculate from context usage if available
     if result.context_usage_percentage is not None:
@@ -889,12 +902,15 @@ async def collect_anthropic_response(
     record_request_cost(
         model=model,
         input_tokens=input_tokens,
-        output_tokens=output_tokens,
+        output_tokens=visible_output_tokens,
         credits=result.credits,
         thinking_budget=thinking_budget,
         max_tokens=request_max_tokens,
         thinking_enabled=thinking_enabled,
         stream=False,
+        thinking_tokens=thinking_token_count,
+        cache_read_input_tokens=upstream_cache_usage.get("cache_read_input_tokens", 0),
+        cache_creation_input_tokens=upstream_cache_usage.get("cache_creation_input_tokens", 0),
     )
 
     return {

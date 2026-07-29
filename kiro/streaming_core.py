@@ -286,6 +286,13 @@ async def _process_chunk(
         elif event["type"] == "metering":
             yield KiroEvent(type="metering", credits=event["data"])
 
+        elif event["type"] == "reasoning":
+            # Native Kiro reasoningContentEvent payload. Upstream only sends the
+            # encrypted signature in a separate frame; the reasoning text itself
+            # arrives here. Yield it as a thinking event so it is accounted as
+            # reasoning tokens rather than conflated with visible output.
+            yield KiroEvent(type="thinking", thinking_content=event["data"])
+
         elif event["type"] == "context_usage":
             yield KiroEvent(type="context_usage", context_usage_percentage=event["data"])
 
