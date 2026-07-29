@@ -495,7 +495,165 @@ class TestAwsEventStreamParserFeed:
         assert len(events) == 1
         assert events[0]["type"] == "context_usage"
         assert events[0]["data"] == 25.5
-    
+
+    def test_parses_metering_event(self, aws_event_parser):
+        """
+        What it does: Tests parsing of Kiro's meteringEvent credit payload.
+        Goal: Ensure per-request credit consumption is extracted. This is the
+              real upstream shape, where "unit" is the first key (not "usage").
+        """
+        print("Setup: Chunk with real metering payload...")
+        chunk = b'{"unit":"credit","unitPlural":"credits","usage":1.0959888895854062}'
+
+        print("Action: Parsing chunk...")
+        events = aws_event_parser.feed(chunk)
+
+        print(f"Result: {events}")
+        assert len(events) == 1
+        assert events[0]["type"] == "metering"
+        assert events[0]["data"] == pytest.approx(1.0959888895854062)
+
+    def test_parses_metering_event_from_unit_plural_only(self, aws_event_parser):
+        """
+        What it does: Accepts metering when only unitPlural marks it as credits.
+        Goal: Ensure the credit check does not depend on a single field.
+        """
+        print("Setup: Chunk with only unitPlural set to credits...")
+        chunk = b'{"unit":"","unitPlural":"credits","usage":2.5}'
+
+        print("Action: Parsing chunk...")
+        events = aws_event_parser.feed(chunk)
+
+        print(f"Result: {events}")
+        assert len(events) == 1
+        assert events[0]["type"] == "metering"
+        assert events[0]["data"] == 2.5
+
+    def test_metering_event_is_case_insensitive(self, aws_event_parser):
+        """
+        What it does: Accepts credit units regardless of casing.
+        Goal: Avoid silently dropping billing data on upstream casing changes.
+        """
+        print("Setup: Chunk with uppercase CREDIT unit...")
+        chunk = b'{"unit":"CREDIT","usage":0.5}'
+
+        print("Action: Parsing chunk...")
+        events = aws_event_parser.feed(chunk)
+
+        print(f"Result: {events}")
+        assert len(events) == 1
+        assert events[0]["type"] == "metering"
+        assert events[0]["data"] == 0.5
+
+    def test_metering_event_converts_int_to_float(self, aws_event_parser):
+        """
+        What it does: Normalises an integer credit amount to float.
+        Goal: Keep the credits type stable for downstream arithmetic.
+        """
+        print("Setup: Chunk with integer usage...")
+        chunk = b'{"unit":"credit","usage":3}'
+
+        print("Action: Parsing chunk...")
+        events = aws_event_parser.feed(chunk)
+
+        print(f"Result: {events}")
+        assert len(events) == 1
+        assert isinstance(events[0]["data"], float)
+        assert events[0]["data"] == 3.0
+
+    def test_ignores_non_credit_unit_event(self, aws_event_parser):
+        """
+        What it does: Ignores '{"unit":' payloads that are not credit metering.
+        Goal: The generic pattern must not misreport unrelated unit payloads
+              as billing data.
+        """
+        print("Setup: Chunk with a non-credit unit...")
+        chunk = b'{"unit":"tokens","usage":500}'
+
+        print("Action: Parsing chunk...")
+        events = aws_event_parser.feed(chunk)
+
+        print(f"Result: {events}")
+        assert events == []
+
+    def test_ignores_metering_event_with_non_numeric_usage(self, aws_event_parser):
+        """
+        What it does: Ignores credit metering whose usage is not a number.
+        Goal: Prevent malformed upstream data from entering cost arithmetic.
+        """
+        print("Setup: Chunk with string usage...")
+        chunk = b'{"unit":"credit","usage":"lots"}'
+
+        print("Action: Parsing chunk...")
+        events = aws_event_parser.feed(chunk)
+
+        print(f"Result: {events}")
+        assert events == []
+
+    def test_ignores_metering_event_with_boolean_usage(self, aws_event_parser):
+        """
+        What it does: Rejects a boolean usage value.
+        Goal: bool is a subclass of int, so it must be excluded explicitly to
+              avoid counting True as 1 credit.
+        """
+        print("Setup: Chunk with boolean usage...")
+        chunk = b'{"unit":"credit","usage":true}'
+
+        print("Action: Parsing chunk...")
+        events = aws_event_parser.feed(chunk)
+
+        print(f"Result: {events}")
+        assert events == []
+
+    def test_ignores_metering_event_without_usage(self, aws_event_parser):
+        """
+        What it does: Ignores credit metering with no usage field at all.
+        Goal: Missing amounts must not be recorded as zero-cost requests.
+        """
+        print("Setup: Chunk with unit but no usage...")
+        chunk = b'{"unit":"credit","unitPlural":"credits"}'
+
+        print("Action: Parsing chunk...")
+        events = aws_event_parser.feed(chunk)
+
+        print(f"Result: {events}")
+        assert events == []
+
+    def test_legacy_usage_event_still_parsed(self, aws_event_parser):
+        """
+        What it does: Verifies the legacy '{"usage":' shape keeps working.
+        Goal: Adding metering support must not regress the older event form.
+        """
+        print("Setup: Chunk with legacy usage-first payload...")
+        chunk = b'{"usage":{"cacheReadInputTokens":12}}'
+
+        print("Action: Parsing chunk...")
+        events = aws_event_parser.feed(chunk)
+
+        print(f"Result: {events}")
+        assert len(events) == 1
+        assert events[0]["type"] == "usage"
+        assert events[0]["data"] == {"cacheReadInputTokens": 12}
+
+    def test_metering_event_parsed_across_chunk_boundary(self, aws_event_parser):
+        """
+        What it does: Assembles a metering event split across two chunks.
+        Goal: Credit data arrives at the end of a stream and must survive
+              arbitrary chunk boundaries.
+        """
+        print("Setup: First half of metering JSON...")
+        events1 = aws_event_parser.feed(b'{"unit":"credit","usa')
+        print(f"After first chunk: {events1}")
+        assert events1 == []
+
+        print("Action: Feeding remainder...")
+        events2 = aws_event_parser.feed(b'ge":1.25}')
+
+        print(f"Result: {events2}")
+        assert len(events2) == 1
+        assert events2[0]["type"] == "metering"
+        assert events2[0]["data"] == 1.25
+
     def test_handles_incomplete_json(self, aws_event_parser):
         """
         What it does: Tests handling of incomplete JSON.

@@ -44,7 +44,7 @@ from kiro.models_anthropic import (
 )
 from kiro.auth import KiroAuthManager, AuthType
 from kiro.cache import ModelInfoCache
-from kiro.converters_anthropic import anthropic_to_kiro
+from kiro.converters_anthropic import anthropic_to_kiro, extract_thinking_config_from_anthropic
 from kiro.streaming_anthropic import (
     stream_kiro_to_anthropic,
     collect_anthropic_response,
@@ -423,7 +423,10 @@ async def messages(
                 system_for_tokenizer = [b.model_dump() if hasattr(b, "model_dump") else b for b in request_data.system]
             else:
                 system_for_tokenizer = request_data.system
-            
+
+            # Reasoning depth for per-request cost accounting (model/effort/credits)
+            cost_thinking_config = extract_thinking_config_from_anthropic(request_data)
+
             try:
                 # Make request to Kiro API
                 response = await http_client.request_with_retry(
@@ -457,6 +460,9 @@ async def messages(
                                     request_messages=messages_for_tokenizer,
                                     request_tools=tools_for_tokenizer,
                                     request_system=system_for_tokenizer,
+                                    thinking_budget=cost_thinking_config.budget_tokens,
+                                    request_max_tokens=request_data.max_tokens,
+                                    thinking_enabled=cost_thinking_config.enabled,
                                 ):
                                     yield chunk
                             except GeneratorExit:
@@ -505,6 +511,9 @@ async def messages(
                             request_messages=messages_for_tokenizer,
                             request_tools=tools_for_tokenizer,
                             request_system=system_for_tokenizer,
+                            thinking_budget=cost_thinking_config.budget_tokens,
+                            request_max_tokens=request_data.max_tokens,
+                            thinking_enabled=cost_thinking_config.enabled,
                         )
                         
                         await http_client.close()
@@ -738,7 +747,10 @@ async def messages(
         system_for_tokenizer = [b.model_dump() if hasattr(b, "model_dump") else b for b in request_data.system]
     else:
         system_for_tokenizer = request_data.system
-    
+
+    # Reasoning depth for per-request cost accounting (model/effort/credits)
+    cost_thinking_config = extract_thinking_config_from_anthropic(request_data)
+
     try:
         # Make request to Kiro API (for both streaming and non-streaming modes)
         # Important: we wait for Kiro response BEFORE returning StreamingResponse,
@@ -815,6 +827,9 @@ async def messages(
                         request_messages=messages_for_tokenizer,
                         request_tools=tools_for_tokenizer,
                         request_system=system_for_tokenizer,
+                        thinking_budget=cost_thinking_config.budget_tokens,
+                        request_max_tokens=request_data.max_tokens,
+                        thinking_enabled=cost_thinking_config.enabled,
                     ):
                         yield chunk
                 except GeneratorExit:
@@ -864,6 +879,9 @@ async def messages(
                 request_messages=messages_for_tokenizer,
                 request_tools=tools_for_tokenizer,
                 request_system=system_for_tokenizer,
+                thinking_budget=cost_thinking_config.budget_tokens,
+                request_max_tokens=request_data.max_tokens,
+                thinking_enabled=cost_thinking_config.enabled,
             )
             
             await http_client.close()

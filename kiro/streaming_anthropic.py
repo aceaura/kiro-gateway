@@ -50,6 +50,7 @@ from kiro.streaming_core import (
 from kiro.tokenizer import count_tokens, estimate_request_tokens
 from kiro.parsers import parse_bracket_tool_calls, deduplicate_tool_calls
 from kiro.config import FIRST_TOKEN_TIMEOUT, FIRST_TOKEN_MAX_RETRIES, FAKE_REASONING_HANDLING
+from kiro.cost_stats import record_request_cost
 
 if TYPE_CHECKING:
     from kiro.auth import KiroAuthManager
@@ -135,7 +136,10 @@ async def stream_kiro_to_anthropic(
     request_messages: Optional[list] = None,
     request_tools: Optional[list] = None,
     request_system: Optional[Any] = None,
-    conversation_id: Optional[str] = None
+    conversation_id: Optional[str] = None,
+    thinking_budget: Optional[int] = None,
+    request_max_tokens: Optional[int] = None,
+    thinking_enabled: bool = True
 ) -> AsyncGenerator[str, None]:
     """
     Generator for converting Kiro stream to Anthropic SSE format.
@@ -153,10 +157,13 @@ async def stream_kiro_to_anthropic(
         request_tools: Original request tools (for token counting)
         request_system: Original system prompt (for token counting)
         conversation_id: Stable conversation ID for truncation recovery (optional)
-    
+        thinking_budget: Thinking budget in tokens (for cost/effort accounting)
+        request_max_tokens: Client's max_tokens limit (normalises the effort label)
+        thinking_enabled: Whether the client left thinking enabled
+
     Yields:
         Strings in Anthropic SSE format
-    
+
     Raises:
         FirstTokenTimeoutError: If first token not received within timeout
     """
@@ -197,7 +204,10 @@ async def stream_kiro_to_anthropic(
     # Track context usage for token calculation
     context_usage_percentage: Optional[float] = None
     upstream_cache_usage: Dict[str, int] = {}
-    
+
+    # Credits consumed by this request (from Kiro meteringEvent, if reported)
+    credits_used: Optional[float] = None
+
     # Track truncated tool calls for recovery
     truncated_tools: List[Dict[str, Any]] = []
     
@@ -522,6 +532,8 @@ async def stream_kiro_to_anthropic(
                 context_usage_percentage = event.context_usage_percentage
             elif event.type == "usage" and event.usage:
                 upstream_cache_usage.update(_extract_cache_usage_fields(event.usage))
+            elif event.type == "metering" and event.credits is not None:
+                credits_used = event.credits
         
         # Track completion signals for truncation detection
         stream_completed_normally = context_usage_percentage is not None
@@ -647,6 +659,20 @@ async def stream_kiro_to_anthropic(
             "output_tokens": output_tokens
         }
         usage_payload.update(upstream_cache_usage)
+        if credits_used is not None:
+            usage_payload["credits_used"] = credits_used
+
+        # Record the model / effort / tokens / credits relationship for cost analysis
+        record_request_cost(
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            credits=credits_used,
+            thinking_budget=thinking_budget,
+            max_tokens=request_max_tokens,
+            thinking_enabled=thinking_enabled,
+            stream=True,
+        )
 
         yield format_sse_event("message_delta", {
             "type": "message_delta",
@@ -725,7 +751,10 @@ async def collect_anthropic_response(
     auth_manager: "KiroAuthManager",
     request_messages: Optional[list] = None,
     request_tools: Optional[list] = None,
-    request_system: Optional[Any] = None
+    request_system: Optional[Any] = None,
+    thinking_budget: Optional[int] = None,
+    request_max_tokens: Optional[int] = None,
+    thinking_enabled: bool = True
 ) -> dict:
     """
     Collect full response from Kiro stream in Anthropic format.
@@ -740,7 +769,10 @@ async def collect_anthropic_response(
         request_messages: Original request messages (for token counting)
         request_tools: Original request tools (for token counting)
         request_system: Original system prompt (for token counting)
-    
+        thinking_budget: Thinking budget in tokens (for cost/effort accounting)
+        request_max_tokens: Client's max_tokens limit (normalises the effort label)
+        thinking_enabled: Whether the client left thinking enabled
+
     Returns:
         Dictionary with full response in Anthropic Messages format
     """
@@ -850,6 +882,20 @@ async def collect_anthropic_response(
         "output_tokens": output_tokens
     }
     usage_payload.update(upstream_cache_usage)
+    if result.credits is not None:
+        usage_payload["credits_used"] = result.credits
+
+    # Record the model / effort / tokens / credits relationship for cost analysis
+    record_request_cost(
+        model=model,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        credits=result.credits,
+        thinking_budget=thinking_budget,
+        max_tokens=request_max_tokens,
+        thinking_enabled=thinking_enabled,
+        stream=False,
+    )
 
     return {
         "id": message_id,
@@ -873,7 +919,10 @@ async def stream_with_first_token_retry_anthropic(
     first_token_timeout: float = FIRST_TOKEN_TIMEOUT,
     request_messages: Optional[list] = None,
     request_tools: Optional[list] = None,
-    request_system: Optional[Any] = None
+    request_system: Optional[Any] = None,
+    thinking_budget: Optional[int] = None,
+    request_max_tokens: Optional[int] = None,
+    thinking_enabled: bool = True
 ) -> AsyncGenerator[str, None]:
     """
     Streaming with automatic retry on first token timeout for Anthropic API.
@@ -934,6 +983,9 @@ async def stream_with_first_token_retry_anthropic(
             request_messages=request_messages,
             request_tools=request_tools,
             request_system=request_system,
+            thinking_budget=thinking_budget,
+            request_max_tokens=request_max_tokens,
+            thinking_enabled=thinking_enabled,
         ):
             yield chunk
     

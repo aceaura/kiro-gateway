@@ -384,3 +384,138 @@ class TestUsageEndpoint:
         assert body["planName"] == "KIRO PRO MAX"
         assert body["remaining"] == 458.5
         assert body["isValid"] is True
+
+
+class TestCostStatsEndpoint:
+    """Tests for the /v1/cost-stats routes."""
+
+    @pytest.fixture(autouse=True)
+    def clean_cost_stats(self):
+        """Resets the shared cost store so tests do not leak into each other."""
+        from kiro.cost_stats import cost_stats
+        cost_stats.reset()
+        yield
+        cost_stats.reset()
+
+    def test_requires_api_key(self, test_client):
+        """
+        What it does: Verifies an unauthenticated read is rejected.
+        Purpose: Usage patterns and model choices must not be readable without the key.
+        """
+        print("Action: Requesting /v1/cost-stats with no Authorization header...")
+        response = test_client.get("/v1/cost-stats")
+
+        print(f"Comparing status: Expected 401, Got {response.status_code}")
+        assert response.status_code == 401
+
+    def test_reset_requires_api_key(self, test_client):
+        """
+        What it does: Verifies an unauthenticated reset is rejected.
+        Purpose: Collected measurements must not be clearable by anyone.
+        """
+        print("Action: Posting /v1/cost-stats/reset with no Authorization header...")
+        response = test_client.post("/v1/cost-stats/reset")
+
+        print(f"Comparing status: Expected 401, Got {response.status_code}")
+        assert response.status_code == 401
+
+    def test_returns_empty_aggregate_before_any_request(self, test_client, auth_headers):
+        """
+        What it does: Returns a zeroed aggregate when nothing was recorded.
+        Purpose: The endpoint must be safe to poll from a fresh gateway.
+        """
+        print("Action: Requesting /v1/cost-stats on a clean store...")
+        response = test_client.get("/v1/cost-stats", headers=auth_headers())
+
+        print(f"Comparing status: Expected 200, Got {response.status_code}")
+        assert response.status_code == 200
+
+        body = response.json()
+        print(f"Checking body: {body}")
+        assert body["groups"] == []
+        assert body["totals"]["requests"] == 0
+        assert body["totals"]["tokens_per_credit"] is None
+
+    def test_returns_recorded_groups(self, test_client, auth_headers):
+        """
+        What it does: Exposes per-(model, effort) credit efficiency.
+        Purpose: This is the data the feature exists to surface.
+        """
+        from kiro.cost_stats import record_request_cost
+
+        print("Setup: Recording two requests on different models...")
+        record_request_cost(
+            model="claude-opus-5",
+            input_tokens=900,
+            output_tokens=100,
+            credits=2.0,
+            thinking_budget=8000,
+            max_tokens=10000,
+        )
+        record_request_cost(
+            model="claude-sonnet-5",
+            input_tokens=400,
+            output_tokens=100,
+            credits=1.0,
+            thinking_budget=2000,
+            max_tokens=10000,
+        )
+
+        print("Action: Requesting /v1/cost-stats...")
+        response = test_client.get("/v1/cost-stats", headers=auth_headers())
+
+        assert response.status_code == 200
+        body = response.json()
+        print(f"Checking groups: {body['groups']}")
+
+        assert body["totals"]["requests"] == 2
+        assert body["totals"]["credits"] == pytest.approx(3.0)
+        assert len(body["groups"]) == 2
+
+        # Sorted by credits spent, so the opus request comes first
+        top = body["groups"][0]
+        assert top["model"] == "claude-opus-5"
+        assert top["effort"] == "high"
+        assert top["tokens_per_credit"] == pytest.approx(500.0)
+
+    def test_reset_clears_collected_stats(self, test_client, auth_headers):
+        """
+        What it does: Empties the aggregate and reports the cleared state.
+        Purpose: Enable a clean measurement run before comparing models.
+        """
+        from kiro.cost_stats import record_request_cost
+
+        print("Setup: Recording one request...")
+        record_request_cost(model="claude-opus-5", input_tokens=10, output_tokens=10, credits=1.0)
+
+        print("Action: Posting /v1/cost-stats/reset...")
+        response = test_client.post("/v1/cost-stats/reset", headers=auth_headers())
+
+        print(f"Comparing status: Expected 200, Got {response.status_code}")
+        assert response.status_code == 200
+
+        body = response.json()
+        print(f"Checking body: {body}")
+        assert body["status"] == "reset"
+        assert body["stats"]["totals"]["requests"] == 0
+
+        print("Verification: Subsequent read is also empty...")
+        follow_up = test_client.get("/v1/cost-stats", headers=auth_headers()).json()
+        assert follow_up["groups"] == []
+
+    def test_does_not_require_an_initialized_account(self, test_client, auth_headers):
+        """
+        What it does: Serves stats even with no Kiro account available.
+        Purpose: Cost data lives in gateway memory, so it must not depend on
+                 upstream auth the way /v1/usage does.
+        """
+        print("Setup: account_manager with no initialized account...")
+        manager = Mock()
+        manager.get_first_account.return_value = None
+
+        with patch.object(test_client.app.state, "account_manager", manager):
+            print("Action: Requesting /v1/cost-stats...")
+            response = test_client.get("/v1/cost-stats", headers=auth_headers())
+
+        print(f"Comparing status: Expected 200, Got {response.status_code}")
+        assert response.status_code == 200

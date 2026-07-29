@@ -44,6 +44,7 @@ from kiro.config import (
     FAKE_REASONING_HANDLING,
 )
 from kiro.tokenizer import count_tokens, count_message_tokens, count_tools_tokens
+from kiro.cost_stats import record_request_cost
 
 # Import from streaming_core - reuse shared parsing logic
 from kiro.streaming_core import (
@@ -78,7 +79,11 @@ async def stream_kiro_to_openai_internal(
     first_token_timeout: float = FIRST_TOKEN_TIMEOUT,
     request_messages: Optional[list] = None,
     request_tools: Optional[list] = None,
-    conversation_id: Optional[str] = None
+    conversation_id: Optional[str] = None,
+    thinking_budget: Optional[int] = None,
+    request_max_tokens: Optional[int] = None,
+    thinking_enabled: bool = True,
+    is_streaming: bool = True
 ) -> AsyncGenerator[str, None]:
     """
     Internal generator for converting Kiro stream to OpenAI format.
@@ -99,8 +104,12 @@ async def stream_kiro_to_openai_internal(
         request_messages: Original request messages (for fallback token counting)
         request_tools: Original request tools (for fallback token counting)
         conversation_id: Stable conversation ID for truncation recovery (optional)
-        conversation_id: Stable conversation ID for truncation recovery (optional)
-    
+        thinking_budget: Thinking budget in tokens (for cost/effort accounting)
+        request_max_tokens: Client's max_tokens limit (normalises the effort label)
+        thinking_enabled: Whether the client left thinking enabled
+        is_streaming: False when this generator backs a non-streaming response,
+            so cost records are attributed to the correct mode
+
     Yields:
         Strings in SSE format: "data: {...}\\n\\n" or "data: [DONE]\\n\\n"
     
@@ -119,6 +128,7 @@ async def stream_kiro_to_openai_internal(
     first_chunk = True
     
     metering_data = None
+    credits_used: Optional[float] = None
     context_usage_percentage = None
     full_content = ""
     full_thinking_content = ""  # Accumulated thinking content for non-streaming
@@ -264,12 +274,17 @@ async def stream_kiro_to_openai_internal(
             
             elif event.type == "usage" and event.usage:
                 metering_data = event.usage
-            
+
+            elif event.type == "metering" and event.credits is not None:
+                credits_used = event.credits
+
             elif event.type == "context_usage" and event.context_usage_percentage is not None:
                 context_usage_percentage = event.context_usage_percentage
         
-        # Track completion signals for truncation detection
-        received_usage = metering_data is not None
+        # Track completion signals for truncation detection.
+        # Kiro's meteringEvent arrives at the end of a complete stream, so it is
+        # as valid a completion signal as the legacy usage event.
+        received_usage = metering_data is not None or credits_used is not None
         received_context_usage = context_usage_percentage is not None
         stream_completed_normally = received_usage or received_context_usage
         
@@ -402,15 +417,32 @@ async def stream_kiro_to_openai_internal(
             }
         }
         
-        if metering_data:
-            final_chunk["usage"]["credits_used"] = metering_data
-        
+        # Prefer the parsed meteringEvent credits. The legacy fallback only emits
+        # a numeric usage value; a legacy dict payload (e.g. cache token fields)
+        # must never be sent as credits_used, which clients read as a number.
+        if credits_used is not None:
+            final_chunk["usage"]["credits_used"] = credits_used
+        elif isinstance(metering_data, (int, float)) and not isinstance(metering_data, bool):
+            final_chunk["usage"]["credits_used"] = float(metering_data)
+
         # Log final token values being sent to client
         logger.debug(
             f"[Usage] {model}: "
             f"prompt_tokens={prompt_tokens} ({prompt_source}), "
             f"completion_tokens={completion_tokens} (tiktoken), "
             f"total_tokens={total_tokens} ({total_source})"
+        )
+
+        # Record the model / effort / tokens / credits relationship for cost analysis
+        record_request_cost(
+            model=model,
+            input_tokens=prompt_tokens,
+            output_tokens=completion_tokens,
+            credits=credits_used,
+            thinking_budget=thinking_budget,
+            max_tokens=request_max_tokens,
+            thinking_enabled=thinking_enabled,
+            stream=is_streaming,
         )
         
         yield f"data: {json.dumps(final_chunk, ensure_ascii=False)}\n\n"
@@ -454,7 +486,11 @@ async def stream_kiro_to_openai(
     model_cache: "ModelInfoCache",
     auth_manager: "KiroAuthManager",
     request_messages: Optional[list] = None,
-    request_tools: Optional[list] = None
+    request_tools: Optional[list] = None,
+    thinking_budget: Optional[int] = None,
+    request_max_tokens: Optional[int] = None,
+    thinking_enabled: bool = True,
+    is_streaming: bool = True
 ) -> AsyncGenerator[str, None]:
     """
     Generator for converting Kiro stream to OpenAI format.
@@ -477,7 +513,11 @@ async def stream_kiro_to_openai(
     async for chunk in stream_kiro_to_openai_internal(
         client, response, model, model_cache, auth_manager,
         request_messages=request_messages,
-        request_tools=request_tools
+        request_tools=request_tools,
+        thinking_budget=thinking_budget,
+        request_max_tokens=request_max_tokens,
+        thinking_enabled=thinking_enabled,
+        is_streaming=is_streaming
     ):
         yield chunk
 
@@ -492,7 +532,10 @@ async def stream_with_first_token_retry(
     max_retries: int = FIRST_TOKEN_MAX_RETRIES,
     first_token_timeout: float = FIRST_TOKEN_TIMEOUT,
     request_messages: Optional[list] = None,
-    request_tools: Optional[list] = None
+    request_tools: Optional[list] = None,
+    thinking_budget: Optional[int] = None,
+    request_max_tokens: Optional[int] = None,
+    thinking_enabled: bool = True
 ) -> AsyncGenerator[str, None]:
     """
     Streaming with automatic retry on first token timeout.
@@ -557,7 +600,10 @@ async def stream_with_first_token_retry(
             auth_manager,
             first_token_timeout=first_token_timeout,
             request_messages=request_messages,
-            request_tools=request_tools
+            request_tools=request_tools,
+            thinking_budget=thinking_budget,
+            request_max_tokens=request_max_tokens,
+            thinking_enabled=thinking_enabled
         ):
             yield chunk
     
@@ -580,7 +626,10 @@ async def collect_stream_response(
     model_cache: "ModelInfoCache",
     auth_manager: "KiroAuthManager",
     request_messages: Optional[list] = None,
-    request_tools: Optional[list] = None
+    request_tools: Optional[list] = None,
+    thinking_budget: Optional[int] = None,
+    request_max_tokens: Optional[int] = None,
+    thinking_enabled: bool = True
 ) -> dict:
     """
     Collect full response from streaming stream.
@@ -614,7 +663,11 @@ async def collect_stream_response(
         model_cache,
         auth_manager,
         request_messages=request_messages,
-        request_tools=request_tools
+        request_tools=request_tools,
+        thinking_budget=thinking_budget,
+        request_max_tokens=request_max_tokens,
+        thinking_enabled=thinking_enabled,
+        is_streaming=False
     ):
         if not chunk_str.startswith("data:"):
             continue

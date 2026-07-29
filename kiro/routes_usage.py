@@ -34,6 +34,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from loguru import logger
 
+from kiro.cost_stats import cost_stats
 from kiro.routes_openai import verify_api_key
 
 router = APIRouter()
@@ -147,3 +148,39 @@ async def get_usage(request: Request) -> Dict[str, Any]:
     data = await fetch_usage_limits(token, account.auth_manager.region)
 
     return build_usage_summary(data)
+
+
+@router.get("/v1/cost-stats", dependencies=[Depends(verify_api_key)])
+async def get_cost_stats() -> Dict[str, Any]:
+    """
+    Return per-model/effort credit efficiency collected since gateway start.
+
+    Kiro bills per invocation with a model-specific credit multiplier, so the
+    useful comparison is how many tokens each credit bought. Groups are keyed by
+    (model, effort) and include credits_per_request, tokens_per_credit and
+    output_tokens_per_credit.
+
+    Returns:
+        Aggregate with "totals" and per-(model, effort) "groups"
+    """
+    logger.info("Request to /v1/cost-stats")
+
+    return cost_stats.snapshot()
+
+
+@router.post("/v1/cost-stats/reset", dependencies=[Depends(verify_api_key)])
+async def reset_cost_stats() -> Dict[str, Any]:
+    """
+    Clear collected cost statistics.
+
+    Useful before a measurement run so that a comparison is not skewed by
+    requests made earlier in the gateway's lifetime.
+
+    Returns:
+        Confirmation payload with the cleared aggregate
+    """
+    logger.info("Request to /v1/cost-stats/reset")
+
+    cost_stats.reset()
+
+    return {"status": "reset", "stats": cost_stats.snapshot()}

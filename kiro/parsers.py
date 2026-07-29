@@ -220,7 +220,9 @@ class AwsEventStreamParser:
     - tool_start: Start of tool call (name, toolUseId)
     - tool_input: Continuation of input for tool call
     - tool_stop: End of tool call
-    - usage: Credit consumption information
+    - usage: Credit consumption information (legacy shape, usage as first key)
+    - metering: Credit consumption from Kiro's meteringEvent
+      ({"unit": "credit", "unitPlural": "credits", "usage": 1.09})
     - context_usage: Context usage percentage
     
     Attributes:
@@ -245,6 +247,7 @@ class AwsEventStreamParser:
         ('{"stop":', 'tool_stop'),
         ('{"followupPrompt":', 'followup'),
         ('{"usage":', 'usage'),
+        ('{"unit":', 'metering'),
         ('{"contextUsagePercentage":', 'context_usage'),
     ]
     
@@ -326,11 +329,45 @@ class AwsEventStreamParser:
             return self._process_tool_stop_event(data)
         elif event_type == 'usage':
             return {"type": "usage", "data": data.get('usage', 0)}
+        elif event_type == 'metering':
+            return self._process_metering_event(data)
         elif event_type == 'context_usage':
             return {"type": "context_usage", "data": data.get('contextUsagePercentage', 0)}
         
         return None
-    
+
+    def _process_metering_event(self, data: dict) -> Optional[Dict[str, Any]]:
+        """
+        Processes Kiro's meteringEvent carrying per-request credit consumption.
+
+        Kiro emits this near the end of a stream in the shape:
+            {"unit": "credit", "unitPlural": "credits", "usage": 1.0959888895854062}
+
+        The generic '{"unit":' pattern can also appear in unrelated payloads, so
+        the unit is validated before the event is reported as credit metering.
+
+        Args:
+            data: Parsed JSON of the metering event
+
+        Returns:
+            Metering event with credit amount, or None if this is not credit metering
+        """
+        unit = data.get('unit')
+        unit_plural = data.get('unitPlural')
+
+        is_credit_unit = any(
+            isinstance(value, str) and value.lower() in ("credit", "credits")
+            for value in (unit, unit_plural)
+        )
+        if not is_credit_unit:
+            return None
+
+        credits = data.get('usage')
+        if not isinstance(credits, (int, float)) or isinstance(credits, bool):
+            return None
+
+        return {"type": "metering", "data": float(credits)}
+
     def _process_content_event(self, data: dict) -> Optional[Dict[str, Any]]:
         """Processes content event."""
         content = data.get('content', '')

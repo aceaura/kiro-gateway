@@ -77,6 +77,7 @@ tests/
 │   ├── test_auth_manager.py        # KiroAuthManager tests (including api_region parameter priority)
 │   ├── test_cache.py               # ModelInfoCache tests (is_valid_model, add_hidden_model)
 │   ├── test_config.py              # Configuration tests (SERVER_HOST, SERVER_PORT, LOG_LEVEL, Account System constants, FALLBACK_MODELS, MODEL_ALIASES)
+│   ├── test_cost_stats.py          # Cost accounting tests (meteringEvent credits, effort classification, aggregates, /v1/cost-stats persistence)
 │   ├── test_converters_anthropic.py # Anthropic Messages API → Kiro converter tests
 │   ├── test_converters_core.py     # Shared conversion logic tests (UnifiedMessage, merging, truncation recovery system prompt)
 │   ├── test_converters_openai.py   # OpenAI Chat API → Kiro converter tests
@@ -95,7 +96,7 @@ tests/
 │   ├── test_parsers.py             # AwsEventStreamParser tests (JSON truncation diagnostics, truncation recovery integration)
 │   ├── test_routes_anthropic.py    # Anthropic API endpoint tests (/v1/messages, truncation recovery, WebSearch, Account System failover)
 │   ├── test_routes_openai.py       # OpenAI API endpoint tests (/v1/chat/completions, truncation recovery, WebSearch, Account System failover)
-│   ├── test_routes_usage.py        # Subscription usage endpoint tests (/v1/usage, getUsageLimits host fallback, quota summarizing)
+│   ├── test_routes_usage.py        # Subscription usage endpoint tests (/v1/usage, getUsageLimits host fallback, quota summarizing, /v1/cost-stats)
 │   ├── test_streaming_anthropic.py # Anthropic streaming response tests (truncation detection, stop_reason priority, initial_response reuse)
 │   ├── test_streaming_core.py      # Shared streaming logic tests (first-token retry, initial_response parameter)
 │   ├── test_streaming_openai.py    # OpenAI streaming response tests (truncation detection, finish_reason priority, initial_response reuse)

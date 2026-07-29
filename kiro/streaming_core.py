@@ -68,11 +68,13 @@ class KiroEvent:
     This format is API-agnostic and can be converted to both OpenAI and Anthropic formats.
     
     Attributes:
-        type: Event type (content, thinking, tool_use, usage, context_usage, error)
+        type: Event type (content, thinking, tool_use, usage, metering,
+              context_usage, error)
         content: Text content (for content events)
         thinking_content: Thinking/reasoning content (for thinking events)
         tool_use: Tool use data (for tool_use events)
         usage: Usage/metering data (for usage events)
+        credits: Credits consumed by this request (for metering events)
         context_usage_percentage: Context usage percentage (for context_usage events)
         is_first_thinking_chunk: Whether this is the first thinking chunk
         is_last_thinking_chunk: Whether this is the last thinking chunk
@@ -82,6 +84,7 @@ class KiroEvent:
     thinking_content: Optional[str] = None
     tool_use: Optional[Dict[str, Any]] = None
     usage: Optional[Dict[str, Any]] = None
+    credits: Optional[float] = None
     context_usage_percentage: Optional[float] = None
     is_first_thinking_chunk: bool = False
     is_last_thinking_chunk: bool = False
@@ -97,12 +100,14 @@ class StreamResult:
         thinking_content: Full thinking/reasoning content
         tool_calls: List of tool calls
         usage: Usage information
+        credits: Credits consumed by this request (from Kiro meteringEvent)
         context_usage_percentage: Context usage percentage from Kiro API
     """
     content: str = ""
     thinking_content: str = ""
     tool_calls: List[Dict[str, Any]] = field(default_factory=list)
     usage: Optional[Dict[str, Any]] = None
+    credits: Optional[float] = None
     context_usage_percentage: Optional[float] = None
 
 
@@ -277,7 +282,10 @@ async def _process_chunk(
         
         elif event["type"] == "usage":
             yield KiroEvent(type="usage", usage=event["data"])
-        
+
+        elif event["type"] == "metering":
+            yield KiroEvent(type="metering", credits=event["data"])
+
         elif event["type"] == "context_usage":
             yield KiroEvent(type="context_usage", context_usage_percentage=event["data"])
 
@@ -319,6 +327,8 @@ async def collect_stream_to_result(
             result.tool_calls.append(event.tool_use)
         elif event.type == "usage" and event.usage:
             result.usage = event.usage
+        elif event.type == "metering" and event.credits is not None:
+            result.credits = event.credits
         elif event.type == "context_usage" and event.context_usage_percentage is not None:
             result.context_usage_percentage = event.context_usage_percentage
     

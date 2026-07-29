@@ -1327,18 +1327,18 @@ class TestStreamingOpenaiMeteringData:
     @pytest.mark.asyncio
     async def test_includes_credits_used_in_usage(self, mock_http_client, mock_response, mock_model_cache, mock_auth_manager):
         """
-        What it does: Includes credits_used in usage when metering data present.
-        Goal: Verify metering data is included.
+        What it does: Includes credits_used in usage when a metering event arrives.
+        Goal: Verify the parsed Kiro meteringEvent float is surfaced to the client.
         """
-        print("Setup: Mock stream with metering data...")
-        
+        print("Setup: Mock stream with a real metering event...")
+
         async def mock_parse_kiro_stream(*args, **kwargs):
             yield KiroEvent(type="content", content="Hello")
-            yield KiroEvent(type="usage", usage={"credits": 0.001})
-        
+            yield KiroEvent(type="metering", credits=0.001)
+
         print("Action: Streaming to OpenAI format...")
         chunks = []
-        
+
         with patch('kiro.streaming_openai.parse_kiro_stream', mock_parse_kiro_stream):
             with patch('kiro.streaming_openai.parse_bracket_tool_calls', return_value=[]):
                 async for chunk in stream_kiro_to_openai(
@@ -1346,13 +1346,65 @@ class TestStreamingOpenaiMeteringData:
                     mock_model_cache, mock_auth_manager
                 ):
                     chunks.append(chunk)
-        
+
         print(f"Received {len(chunks)} chunks")
-        
-        # Final chunk should have credits_used
+
+        # Final chunk should have credits_used as a float
         final_chunk = chunks[-2]  # Before [DONE]
-        assert '"credits_used"' in final_chunk
+        assert '"credits_used": 0.001' in final_chunk
         print("✓ credits_used included in usage")
+
+    @pytest.mark.asyncio
+    async def test_legacy_numeric_usage_event_emits_credits_used(self, mock_http_client, mock_response, mock_model_cache, mock_auth_manager):
+        """
+        What it does: Emits credits_used when a legacy numeric usage event arrives.
+        Goal: Older upstreams that report usage as a bare number still surface a float.
+        """
+        print("Setup: Mock stream with legacy numeric usage...")
+
+        async def mock_parse_kiro_stream(*args, **kwargs):
+            yield KiroEvent(type="content", content="Hello")
+            yield KiroEvent(type="usage", usage=1.5)
+
+        chunks = []
+        with patch('kiro.streaming_openai.parse_kiro_stream', mock_parse_kiro_stream):
+            with patch('kiro.streaming_openai.parse_bracket_tool_calls', return_value=[]):
+                async for chunk in stream_kiro_to_openai(
+                    mock_http_client, mock_response, "claude-sonnet-4",
+                    mock_model_cache, mock_auth_manager
+                ):
+                    chunks.append(chunk)
+
+        final_chunk = chunks[-2]
+        print(f"Final chunk: {final_chunk[:200]}")
+        assert '"credits_used": 1.5' in final_chunk
+
+    @pytest.mark.asyncio
+    async def test_legacy_dict_usage_event_does_not_emit_credits_used(self, mock_http_client, mock_response, mock_model_cache, mock_auth_manager):
+        """
+        What it does: Suppresses credits_used when the legacy usage payload is a dict.
+        Goal: credits_used must always be numeric; cache-field dicts (e.g.
+              {"cacheReadInputTokens": 12}) must not be sent as a credit amount.
+        """
+        print("Setup: Mock stream with legacy dict usage payload...")
+
+        async def mock_parse_kiro_stream(*args, **kwargs):
+            yield KiroEvent(type="content", content="Hello")
+            yield KiroEvent(type="usage", usage={"cacheReadInputTokens": 12})
+
+        chunks = []
+        with patch('kiro.streaming_openai.parse_kiro_stream', mock_parse_kiro_stream):
+            with patch('kiro.streaming_openai.parse_bracket_tool_calls', return_value=[]):
+                async for chunk in stream_kiro_to_openai(
+                    mock_http_client, mock_response, "claude-sonnet-4",
+                    mock_model_cache, mock_auth_manager
+                ):
+                    chunks.append(chunk)
+
+        final_chunk = chunks[-2]
+        print(f"Final chunk: {final_chunk[:200]}")
+        assert '"credits_used"' not in final_chunk
+        print("✓ dict-shaped usage not sent as credits_used")
 
 
 # ==================================================================================================
