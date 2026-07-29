@@ -248,6 +248,33 @@ HIDDEN_MODELS: Dict[str, str] = {
 # Default: {"auto-kiro": "auto"} to avoid Cursor IDE conflict
 MODEL_ALIASES: Dict[str, str] = {
     "auto-kiro": "auto",  # Default alias to avoid Cursor's "auto" model conflict
+    "auto": "auto",  # Kiro "Auto" task-based routing (1x credit)
+
+    # --- Claude 5 (IDE names, no minor version) ---
+    "claude-opus-5": "claude-opus-5",
+    "claude-sonnet-5": "claude-sonnet-5",
+    # Accept Anthropic-style dotted ids from clients, map to the IDE's real ids
+    "claude-opus-4.5": "claude-opus-5",
+    "claude-sonnet-4.5": "claude-sonnet-5",
+
+    # --- Claude 4.x (IDE has 4.5 / 4.6 / 4.7 / 4.8) ---
+    "claude-opus-4.8": "claude-opus-4.8",
+    "claude-opus-4.7": "claude-opus-4.7",
+    "claude-opus-4.6": "claude-opus-4.6",
+    "claude-sonnet-4.6": "claude-sonnet-4.6",
+    "claude-sonnet-4": "claude-sonnet-4",
+
+    # --- GPT 5.6 ---
+    "gpt-5.6-sol": "gpt-5.6-sol",
+    "gpt-5.6-terra": "gpt-5.6-terra",
+    "gpt-5.6-luna": "gpt-5.6-luna",
+
+    # --- Other providers ---
+    "deepseek-3.2": "deepseek-3.2",
+    "minimax-m2.5": "minimax-m2.5",
+    "minimax-m2.1": "minimax-m2.1",
+    "glm-5": "glm-5",
+    "qwen3-coder-next": "qwen3-coder-next",
 }
 
 # Models to hide from /v1/models endpoint.
@@ -275,13 +302,20 @@ HIDDEN_FROM_LIST: List[str] = ["auto"]
 # - Update gateway regularly to get the latest model list
 FALLBACK_MODELS: List[Dict[str, str]] = [
     {"modelId": "auto"},
-    {"modelId": "claude-sonnet-4"},
-    {"modelId": "claude-sonnet-4.5"},
-    {"modelId": "claude-sonnet-4.6"},
-    {"modelId": "claude-haiku-4.5"},
-    {"modelId": "claude-opus-4.5"},
-    {"modelId": "claude-opus-4.6"},
+    # Claude 5 (this account's real ids)
+    {"modelId": "claude-opus-5"},
+    {"modelId": "claude-sonnet-5"},
+    # Claude 4.x
+    {"modelId": "claude-opus-4.8"},
     {"modelId": "claude-opus-4.7"},
+    {"modelId": "claude-opus-4.6"},
+    {"modelId": "claude-sonnet-4.6"},
+    {"modelId": "claude-sonnet-4"},
+    # GPT 5.6
+    {"modelId": "gpt-5.6-sol"},
+    {"modelId": "gpt-5.6-terra"},
+    {"modelId": "gpt-5.6-luna"},
+    # Other providers
     {"modelId": "deepseek-3.2"},
     {"modelId": "glm-5"},
     {"modelId": "minimax-m2.1"},

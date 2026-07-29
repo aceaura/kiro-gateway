@@ -583,7 +583,57 @@ class TestFallbackModelsConfig:
         print("Verification: Contains at least one Claude model...")
         has_claude = any("claude" in mid.lower() for mid in model_ids)
         assert has_claude, "No Claude models in fallback list"
-    
+
+    def test_fallback_models_contain_claude5_models(self):
+        """
+        What it does: Verifies that fallback models include the Claude 5 ids.
+        Purpose: Guard against regression to the old list (haiku-4.5 etc.) that
+                 does not exist on current Kiro plans and triggers INVALID_MODEL_ID.
+        """
+        print("Setup: Importing FALLBACK_MODELS...")
+        from kiro.config import FALLBACK_MODELS
+
+        model_ids = {m["modelId"] for m in FALLBACK_MODELS}
+        print(f"Model IDs in fallback list: {sorted(model_ids)}")
+
+        print("Verification: Claude 5 ids present...")
+        assert "claude-opus-5" in model_ids, "claude-opus-5 missing from fallback list"
+        assert "claude-sonnet-5" in model_ids, "claude-sonnet-5 missing from fallback list"
+
+    def test_model_aliases_map_dotted_to_claude5(self):
+        """
+        What it does: Verifies MODEL_ALIASES maps legacy dotted ids to Claude 5 ids.
+        Purpose: Clients sending claude-opus-4.5 / claude-sonnet-4.5 must be routed
+                 to claude-opus-5 / claude-sonnet-5 on accounts lacking the 4.5 ids.
+        """
+        print("Setup: Importing MODEL_ALIASES...")
+        from kiro.config import MODEL_ALIASES
+
+        print(f"Aliases: {MODEL_ALIASES}")
+
+        print("Verification: dotted 4.5 aliases point at Claude 5 ids...")
+        assert MODEL_ALIASES.get("claude-opus-4.5") == "claude-opus-5"
+        assert MODEL_ALIASES.get("claude-sonnet-4.5") == "claude-sonnet-5"
+
+    def test_model_aliases_values_are_valid_fallback_models(self):
+        """
+        What it does: Verifies every MODEL_ALIASES target resolves to a known model id.
+        Purpose: Catch typos where an alias points at a model not in FALLBACK_MODELS,
+                 which would fall through to passthrough and risk INVALID_MODEL_ID.
+        """
+        print("Setup: Importing MODEL_ALIASES and FALLBACK_MODELS...")
+        from kiro.config import MODEL_ALIASES, FALLBACK_MODELS
+
+        fallback_ids = {m["modelId"] for m in FALLBACK_MODELS}
+        print(f"Alias targets: {sorted(set(MODEL_ALIASES.values()))}")
+        print(f"Fallback ids: {sorted(fallback_ids)}")
+
+        print("Verification: every alias target is a known fallback model...")
+        for alias, target in MODEL_ALIASES.items():
+            assert target in fallback_ids, (
+                f"Alias '{alias}' targets '{target}' which is not in FALLBACK_MODELS"
+            )
+
     def test_fallback_models_use_dot_format(self):
         """
         What it does: Verifies that model IDs use dot format (e.g., claude-4.5).
@@ -632,11 +682,13 @@ class TestFallbackModelsIntegration:
         resolver = ModelResolver(cache=cache, hidden_models={})
         
         print("\nAction: Testing normalization with dash format...")
-        # Test that dash format (claude-opus-4-5) is normalized and found
+        # Test that dash format (claude-opus-4-8) is normalized and found.
+        # Use models that actually exist in the current FALLBACK_MODELS list
+        # (the account-specific list no longer ships the old 4.5 claude ids).
         test_cases = [
-            ("claude-opus-4-5", "claude-opus-4.5"),  # Dash → Dot
-            ("claude-sonnet-4-5", "claude-sonnet-4.5"),  # Dash → Dot
-            ("claude-haiku-4-5", "claude-haiku-4.5"),  # Dash → Dot
+            ("claude-opus-4-8", "claude-opus-4.8"),  # Dash → Dot
+            ("claude-opus-4-6", "claude-opus-4.6"),  # Dash → Dot
+            ("claude-sonnet-4-6", "claude-sonnet-4.6"),  # Dash → Dot
         ]
         
         for input_name, expected_normalized in test_cases:
