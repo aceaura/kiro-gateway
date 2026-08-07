@@ -475,6 +475,10 @@ VPN_PROXY_URL=http://username:password@proxy.company.com:8080
 
 # Without protocol (defaults to http://)
 VPN_PROXY_URL=192.168.1.100:8080
+
+# Separate SOCKS5 endpoint for ALL_PROXY (HTTP(S) and SOCKS5 on different ports)
+VPN_PROXY_URL=http://127.0.0.1:8234
+VPN_SOCKS5_PROXY_URL=socks5://127.0.0.1:8235
 ```
 
 ### Supported Protocols
@@ -503,6 +507,8 @@ Most VPN clients provide a local proxy server you can use:
 - **Corporate VPN** — Check your IT department for proxy settings
 
 Leave `VPN_PROXY_URL` empty (default) if you don't need proxy support.
+
+`VPN_SOCKS5_PROXY_URL` is optional: when set, `ALL_PROXY` uses it (e.g. `socks5://127.0.0.1:8235`) while `HTTP_PROXY`/`HTTPS_PROXY` keep using `VPN_PROXY_URL`. Leave it empty to reuse `VPN_PROXY_URL` for `ALL_PROXY`.
 
 ---
 

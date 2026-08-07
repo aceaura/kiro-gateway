@@ -75,6 +75,7 @@ from kiro.config import (
     HIDDEN_FROM_LIST,
     FALLBACK_MODELS,
     VPN_PROXY_URL,
+    VPN_SOCKS5_PROXY_URL,
     ACCOUNT_SYSTEM,
     ACCOUNTS_CONFIG_FILE,
     ACCOUNTS_STATE_FILE,
@@ -188,21 +189,39 @@ setup_logging_intercept()
 if VPN_PROXY_URL:
     # Normalize URL - add http:// if no scheme specified
     proxy_url_with_scheme = VPN_PROXY_URL if "://" in VPN_PROXY_URL else f"http://{VPN_PROXY_URL}"
-    
-    # Set environment variables for httpx to pick up automatically
-    os.environ['HTTP_PROXY'] = proxy_url_with_scheme
-    os.environ['HTTPS_PROXY'] = proxy_url_with_scheme
-    os.environ['ALL_PROXY'] = proxy_url_with_scheme
-    
+
+    # Set environment variables for httpx to pick up automatically.
+    # httpx (via httpcore) checks LOWERCASE names first, so any stale lowercase
+    # value (e.g. a Dockerfile ENV http_proxy=127.0.0.1:...) would silently win.
+    # Set both cases to the same value to stay consistent.
+    for key in ("HTTP_PROXY", "http_proxy"):
+        os.environ[key] = proxy_url_with_scheme
+    for key in ("HTTPS_PROXY", "https_proxy"):
+        os.environ[key] = proxy_url_with_scheme
+
+    # ALL_PROXY may use a separate SOCKS5 endpoint (e.g. http(s) on :8234,
+    # socks5 on :8235). Fall back to the HTTP(S) proxy if not configured.
+    if VPN_SOCKS5_PROXY_URL:
+        all_proxy_url = VPN_SOCKS5_PROXY_URL if "://" in VPN_SOCKS5_PROXY_URL else f"socks5://{VPN_SOCKS5_PROXY_URL}"
+    else:
+        all_proxy_url = proxy_url_with_scheme
+    for key in ("ALL_PROXY", "all_proxy"):
+        os.environ[key] = all_proxy_url
+
     # Exclude localhost from proxy to avoid routing local requests through it
     no_proxy_hosts = os.environ.get("NO_PROXY", "")
     local_hosts = "127.0.0.1,localhost"
     if no_proxy_hosts:
-        os.environ["NO_PROXY"] = f"{no_proxy_hosts},{local_hosts}"
+        merged = f"{no_proxy_hosts},{local_hosts}"
     else:
-        os.environ["NO_PROXY"] = local_hosts
-    
+        merged = local_hosts
+    # Set both cases: httpx honors lowercase no_proxy first
+    os.environ["NO_PROXY"] = merged
+    os.environ["no_proxy"] = merged
+
     logger.info(f"Proxy configured: {proxy_url_with_scheme}")
+    if all_proxy_url != proxy_url_with_scheme:
+        logger.info(f"ALL_PROXY configured: {all_proxy_url}")
     logger.debug(f"NO_PROXY: {os.environ['NO_PROXY']}")
 
 

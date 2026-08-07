@@ -120,6 +120,14 @@ PROXY_API_KEY: str = os.getenv("PROXY_API_KEY", "my-super-secret-password-123")
 #   VPN_PROXY_URL=192.168.1.100:8080  (defaults to http://)
 VPN_PROXY_URL: str = os.getenv("VPN_PROXY_URL", "")
 
+# Optional SOCKS5 proxy, applied to ALL_PROXY only.
+# Use together with VPN_PROXY_URL when HTTP(S) and SOCKS5 proxies listen on
+# different ports, e.g.:
+#   VPN_PROXY_URL=http://127.0.0.1:8234        -> HTTP_PROXY / HTTPS_PROXY
+#   VPN_SOCKS5_PROXY_URL=socks5://127.0.0.1:8235 -> ALL_PROXY
+# Leave empty to derive ALL_PROXY from VPN_PROXY_URL (previous behavior).
+VPN_SOCKS5_PROXY_URL: str = os.getenv("VPN_SOCKS5_PROXY_URL", "")
+
 # ==================================================================================================
 # Kiro API Credentials
 # ==================================================================================================

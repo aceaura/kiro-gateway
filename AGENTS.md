@@ -635,6 +635,8 @@ For users in restricted networks (China, corporate):
 VPN_PROXY_URL="http://127.0.0.1:7890"      # HTTP proxy
 VPN_PROXY_URL="socks5://127.0.0.1:1080"    # SOCKS5 proxy
 VPN_PROXY_URL="http://user:pass@proxy:8080" # With auth
+# Optional: separate SOCKS5 endpoint for ALL_PROXY
+VPN_SOCKS5_PROXY_URL="socks5://127.0.0.1:8235"
 ```
 
 ## Common Tasks

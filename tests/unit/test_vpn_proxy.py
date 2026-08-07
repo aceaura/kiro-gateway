@@ -279,32 +279,93 @@ def test_proxy_with_special_characters():
 def test_empty_vpn_proxy_url_does_not_set_variables(monkeypatch):
     """
     Verifies that empty VPN_PROXY_URL doesn't set any proxy variables.
-    
+
     This is the default behavior - direct connection without proxy.
     """
     print("\n--- Test: Empty VPN_PROXY_URL (direct connection) ---")
-    
+
     # Clear all proxy variables
     for key in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"]:
         monkeypatch.delenv(key, raising=False)
-    
+
     # Simulate empty VPN_PROXY_URL
     vpn_url = ""
-    
+
     # Logic from main.py - should NOT execute if vpn_url is empty
     if vpn_url:
         proxy_url_with_scheme = vpn_url if "://" in vpn_url else f"http://{vpn_url}"
         os.environ['HTTP_PROXY'] = proxy_url_with_scheme
         os.environ['HTTPS_PROXY'] = proxy_url_with_scheme
         os.environ['ALL_PROXY'] = proxy_url_with_scheme
-    
+
     # Verify no proxy variables are set
     assert os.environ.get("HTTP_PROXY") is None, "HTTP_PROXY should not be set!"
     assert os.environ.get("HTTPS_PROXY") is None, "HTTPS_PROXY should not be set!"
     assert os.environ.get("ALL_PROXY") is None, "ALL_PROXY should not be set!"
-    
+
     print("✅ No proxy variables set (direct connection)")
     print("--- Test passed ---")
+
+
+@pytest.mark.parametrize(
+    "test_id, vpn_url, socks5_url, expected_http, expected_all",
+    [
+        (
+            "separate_socks5_for_all_proxy",
+            "http://127.0.0.1:8234",
+            "socks5://127.0.0.1:8235",
+            "http://127.0.0.1:8234",
+            "socks5://127.0.0.1:8235",
+        ),
+        (
+            "socks5_without_scheme_defaults_to_socks5",
+            "http://127.0.0.1:8234",
+            "127.0.0.1:8235",
+            "http://127.0.0.1:8234",
+            "socks5://127.0.0.1:8235",
+        ),
+        (
+            "no_socks5_falls_back_to_http_proxy",
+            "http://127.0.0.1:8234",
+            "",
+            "http://127.0.0.1:8234",
+            "http://127.0.0.1:8234",
+        ),
+    ]
+)
+def test_vpn_socks5_proxy_url(test_id, vpn_url, socks5_url, expected_http, expected_all, monkeypatch):
+    """
+    Verifies VPN_SOCKS5_PROXY_URL handling (mirrors main.py logic):
+
+    - ALL_PROXY uses VPN_SOCKS5_PROXY_URL when set (socks5 on a different port)
+    - Scheme-less socks5 values default to socks5://
+    - Empty VPN_SOCKS5_PROXY_URL falls back to the HTTP(S) proxy URL
+    """
+    print(f"\n--- Running VPN_SOCKS5_PROXY_URL test: ID = {test_id} ---")
+
+    for key in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"]:
+        monkeypatch.delenv(key, raising=False)
+
+    # Replicate logic from main.py
+    if vpn_url:
+        proxy_url_with_scheme = vpn_url if "://" in vpn_url else f"http://{vpn_url}"
+        os.environ['HTTP_PROXY'] = proxy_url_with_scheme
+        os.environ['HTTPS_PROXY'] = proxy_url_with_scheme
+
+        if socks5_url:
+            all_proxy_url = socks5_url if "://" in socks5_url else f"socks5://{socks5_url}"
+        else:
+            all_proxy_url = proxy_url_with_scheme
+        os.environ['ALL_PROXY'] = all_proxy_url
+
+    print(f"HTTP_PROXY: Expected '{expected_http}', Got '{os.environ.get('HTTP_PROXY')}'")
+    assert os.environ.get("HTTP_PROXY") == expected_http, "HTTP_PROXY mismatch!"
+    assert os.environ.get("HTTPS_PROXY") == expected_http, "HTTPS_PROXY mismatch!"
+
+    print(f"ALL_PROXY: Expected '{expected_all}', Got '{os.environ.get('ALL_PROXY')}'")
+    assert os.environ.get("ALL_PROXY") == expected_all, "ALL_PROXY mismatch!"
+
+    print(f"--- Test '{test_id}' passed successfully ---")
 
 
 print("VPN/Proxy tests loaded. Will verify proxy setup logic!")

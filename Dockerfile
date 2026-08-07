@@ -33,6 +33,19 @@ RUN mkdir -p debug_logs && chown -R kiro:kiro debug_logs
 # Switch to non-root user
 USER kiro
 
+# Default proxy for Kiro API egress at RUNTIME (override via docker-compose/.env).
+# Set after the build so it does not affect RUN steps (e.g. pip install).
+# Default points at the host via host.docker.internal (bridge networking).
+# 127.0.0.1 would be the container itself and breaks the connection; only use
+# it with --network host.
+ENV https_proxy=http://host.docker.internal:8234 \
+    http_proxy=http://host.docker.internal:8234 \
+    all_proxy=socks5://host.docker.internal:8235 \
+    no_proxy=127.0.0.1,localhost \
+    NO_PROXY=127.0.0.1,localhost \
+    VPN_PROXY_URL=http://host.docker.internal:8234 \
+    VPN_SOCKS5_PROXY_URL=socks5://host.docker.internal:8235
+
 # Expose port
 EXPOSE 8000
 
